@@ -18,7 +18,7 @@ descent.
 
 ## Key features
 
-- We have reorganized and rewritten the implement of [SAWtooth_layer.py](https://github.com/wds2014/SawETM/blob/main/README.md), making it more flexible 
+- We have reorganized and rewritten the implement of [SAWtooth_layer.py](https://github.com/wds2014/SawETM/blob/main/model.py#L22), making it more flexible 
 to apply the latent topic representation to other tasks, such as image caption, nature language process.
 - We also provide a wide-used text corpus `20ng_2000.pkl` for easy getting started. One can customize their own data based on this file.
 
