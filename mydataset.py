@@ -74,9 +74,11 @@ class CustomDataset_txt_ppl(Dataset):
     def __init__(self, data_file, ratio=0.8):
         with open(data_file, 'rb') as f:
             data = pickle.load(f)
-        data_all = data['data_2000'].toarray()
+        data_all = data['bow'].toarray()
+        # data_all = data['data_2000'].toarray()
         self.train_data, self.test_data = gen_ppl_doc(data_all.astype("int32"), ratio=ratio)
-        self.voc = data['voc2000']
+        self.voc = data['voc']
+        # self.voc = data['voc2000']
         self.N, self.vocab_size = self.train_data.shape
         for i in range(self.N):
             if np.sum(self.train_data[i]) >2 and np.sum(self.test_data[i]) > 2:

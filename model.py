@@ -20,12 +20,12 @@ import pickle
 import os
 
 class SAWtooth_layer(nn.Module):
-    def __init__(self, alpha, rho, d_in=768, d_dim=256, pre_topic_k=100, is_top=False, is_bottom=False, learn_prior=True, device='cuda:0'):
+    def __init__(self, alpha, rho, d_in=768, d_dim=256, pre_topic_k=100, is_top=False, is_bottom=False, learn_prior=False, device='cuda:0'):
         super(SAWtooth_layer, self).__init__()
-        self.real_min = torch.tensor(1e-30)
-        self.wei_shape_max = torch.tensor(100.0).float()
-        self.wei_shape_min = torch.tensor(0.1).float()
-        self.theta_max = torch.tensor(1000.0).float()
+        self.real_min = torch.tensor(1e-30).to(device)
+        self.wei_shape_max = torch.tensor(100.0).float().to(device)
+        self.wei_shape_min = torch.tensor(0.1).float().to(device)
+        self.theta_max = torch.tensor(1000.0).float().to(device)
         self.is_top = is_top
         self.is_bottom = is_bottom
         self.device = device
@@ -208,3 +208,167 @@ class Sawtooth(nn.Module):
 
         return rec_list, kl_loss_list, phi_list, phi_theta_list, theta_list
 
+
+class ETM(nn.Module):
+    """
+    topic model in word embedding space
+    """
+
+    def __init__(self, num_topics=100, vocab_size=2000, t_hidden_size=100, rho_size=100, emsize=100,
+                 theta_act='softplus', embeddings=None, train_embeddings=True, enc_drop=0.5, device='cuda:0'):
+        super(ETM, self).__init__()
+
+        ## define hyperparameters
+        self.num_topics = num_topics
+        self.vocab_size = vocab_size
+        self.t_hidden_size = t_hidden_size
+        self.rho_size = rho_size
+        self.enc_drop = enc_drop
+        self.emsize = emsize
+        self.t_drop = nn.Dropout(enc_drop)
+
+        self.theta_act = self.get_activation(theta_act)
+        self.f_mu_batchnorm = nn.BatchNorm1d(num_topics, affine=False)
+        self.f_sigma_batchnorm = nn.BatchNorm1d(num_topics, affine=False)
+
+        ## define the word embedding matrix \rho
+        if train_embeddings:
+            self.rho = nn.Linear(rho_size, vocab_size, bias=False)
+        else:
+            num_embeddings, emsize = embeddings.size()
+            rho = nn.Embedding(num_embeddings, emsize)
+            self.rho = embeddings.clone().float().to(device)
+
+        ## define the matrix containing the topic embeddings
+        self.alphas = nn.Linear(rho_size, num_topics, bias=False)
+
+        ## define variational distribution for \theta_{1:D} via amortizartion
+        print(vocab_size, " THE Vocabulary size is here ")
+        self.q_theta = nn.Sequential(
+            nn.Linear(vocab_size, t_hidden_size),
+            self.theta_act,
+            nn.Linear(t_hidden_size, t_hidden_size),
+            self.theta_act,
+        )
+        self.mu_q_theta = nn.Sequential(
+            nn.Linear(t_hidden_size, num_topics, bias=True),
+            self.f_mu_batchnorm)
+        self.logsigma_q_theta = nn.Sequential(
+            nn.Linear(t_hidden_size, num_topics, bias=True),
+            self.f_sigma_batchnorm)
+
+    def get_activation(self, act):
+        if act == 'tanh':
+            act = nn.Tanh()
+        elif act == 'relu':
+            act = nn.ReLU()
+        elif act == 'softplus':
+            act = nn.Softplus()
+        elif act == 'rrelu':
+            act = nn.RReLU()
+        elif act == 'leakyrelu':
+            act = nn.LeakyReLU()
+        elif act == 'elu':
+            act = nn.ELU()
+        elif act == 'selu':
+            act = nn.SELU()
+        elif act == 'glu':
+            act = nn.GLU()
+        else:
+            print('Defaulting to tanh activations...')
+            act = nn.Tanh()
+        return act
+
+    def reparameterize(self, mu, logvar, sample_num=20):
+        """Returns a sample from a Gaussian distribution via reparameterization.
+        """
+        if self.training:
+            logvar_sample = logvar.unsqueeze(0).repeat([sample_num, 1, 1])
+            mu_sample = mu.unsqueeze(0).repeat([sample_num, 1, 1])
+            std = torch.exp(0.5 * logvar_sample)
+            eps = torch.randn_like(std)
+            return (eps.mul_(std).add_(mu_sample)).mean(0)
+        else:
+            return mu
+
+    def encode(self, bows):
+        """Returns paramters of the variational distribution for \theta.
+        input: bows
+                batch of bag-of-words...tensor of shape bsz x V
+        output: mu_theta, log_sigma_theta
+        """
+        q_theta = self.q_theta(bows)
+        if self.enc_drop > 0:
+            q_theta = self.t_drop(q_theta)
+        mu_theta = self.mu_q_theta(q_theta)
+        logsigma_theta = self.logsigma_q_theta(q_theta)
+        z = self.reparameterize(mu_theta, logsigma_theta)
+        z = torch.clamp(z, 1e-20, 1e1)
+        theta = F.softmax(z, dim=-1)
+        kl_theta = -0.5 * torch.sum(1 + logsigma_theta - mu_theta.pow(2) - logsigma_theta.exp(), dim=-1).mean()
+        return theta, kl_theta
+
+    def get_beta(self):
+        """
+        This generate the description as a defintion over words
+        Returns:
+            [type]: [description]
+        """
+        try:
+            logit = self.alphas(self.rho.weight)  # torch.mm(self.rho, self.alphas)
+        except:
+            logit = self.alphas(self.rho)
+        beta = F.softmax(logit, dim=0).t()  ## softmax over vocab dimension
+        return beta
+
+    def get_theta_from_embedding(self, embedding):
+        mu_theta = self.mu_q_theta(embedding)
+        logsigma_theta = self.logsigma_q_theta(embedding)
+        z = self.reparameterize(mu_theta, logsigma_theta)
+        z = torch.clamp(z, 1e-20, 1e1)
+        theta = F.softmax(z, dim=-1)
+        return theta
+
+    def get_theta(self, bows):
+        """
+        getting the topic poportion for the document passed in the normalixe bow or tf-idf"""
+        normalized_bows = bows / (torch.sum(bows, dim=1, keepdim=True) + 1e-10)
+        # normalized_bows = bows
+        theta, kld_theta = self.encode(normalized_bows)
+
+        return theta
+
+    def decode(self, theta, beta):
+        """compute the probability of topic given the document which is equal to theta^T ** B
+        Args:
+            theta ([type]): [description]
+            beta ([type]): [description]
+        Returns:
+            [type]: [description]
+        """
+        res = torch.mm(theta, beta)
+        almost_zeros = torch.full_like(res, 1e-6)
+        results_without_zeros = res.add(almost_zeros)
+        predictions = torch.log(results_without_zeros)
+        return predictions
+
+    def forward(self, bows, theta=None, aggregate=True):
+        ## get \theta
+        normalized_bows = bows / (torch.sum(bows, dim=1, keepdim=True) + 1e-10)
+        # normalized_bows = bows
+        theta, kld_theta = self.encode(normalized_bows)
+        # if theta is None:
+        #     theta, kld_theta = self.get_theta(normalized_bows)
+        # else:
+        #     kld_theta = None
+
+        ## get \beta
+        beta = self.get_beta()   ## k,v
+
+        ## get prediction loss
+        # preds = self.decode(theta, beta)
+        preds = torch.mm(theta, beta)
+        recon_loss = -(torch.log(preds+1e-10) * bows).sum(1)
+        if aggregate:
+            recon_loss = recon_loss.mean()
+        return recon_loss,kld_theta, beta.t().cpu().detach().numpy(), preds, theta
