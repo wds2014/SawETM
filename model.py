@@ -28,6 +28,7 @@ class SAWtooth_layer(nn.Module):
         self.theta_max = torch.tensor(1000.0).float().to(device)
         self.is_top = is_top
         self.is_bottom = is_bottom
+        self.learn_prior = learn_prior
         self.device = device
 
         self.alpha = alpha   ### v,d
@@ -92,8 +93,12 @@ class SAWtooth_layer(nn.Module):
         theta = self.reparameterize(k, l)       ### n,k
         phi_theta, phi = self.decoder(theta.t())   #### v,n
         if self.is_top:
-            kl_loss = self.KL_GamWei(self.k_prior.t(),
-                                     self.l_prior.t(),k.t(), l.t())
+            if self.learn_prior:
+                kl_loss = self.KL_GamWei(F.softplus(self.k_prior.t()),
+                                     F.softplus(self.l_prior.t()),k.t(), l.t())
+            else:
+                kl_loss = self.KL_GamWei(self.k_prior.t(),
+                                         self.l_prior.t(),k.t(), l.t())
         else:
             kl_loss = self.KL_GamWei(prior, torch.tensor(1.0, dtype=torch.float32).to(self.device),
                            k.t(), l.t())
